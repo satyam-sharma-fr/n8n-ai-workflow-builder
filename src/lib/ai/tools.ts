@@ -96,6 +96,7 @@ export function createWorkflowTools(n8nUrl: string, n8nKey: string) {
           const docs = await findRelevantNodeDocs(query, 8);
           if (docs.length === 0) {
             return {
+              success: true as const,
               results: [],
               message:
                 "No documentation found. The node docs database may need to be synced. " +
@@ -103,6 +104,7 @@ export function createWorkflowTools(n8nUrl: string, n8nKey: string) {
             };
           }
           return {
+            success: true as const,
             results: docs.map((d) => ({
               nodeType: d.nodeType,
               displayName: d.displayName,
@@ -114,6 +116,7 @@ export function createWorkflowTools(n8nUrl: string, n8nKey: string) {
           };
         } catch (err) {
           return {
+            success: false as const,
             results: [],
             error:
               err instanceof Error
@@ -143,11 +146,13 @@ export function createWorkflowTools(n8nUrl: string, n8nKey: string) {
           const docs = await getNodeDocsByType(nodeType);
           if (docs.length === 0) {
             return {
+              success: true as const,
               found: false,
               message: `No documentation found for "${nodeType}". It may not exist or the docs may need syncing.`,
             };
           }
           return {
+            success: true as const,
             found: true,
             nodeType: docs[0].nodeType,
             displayName: docs[0].displayName,
@@ -158,6 +163,7 @@ export function createWorkflowTools(n8nUrl: string, n8nKey: string) {
           };
         } catch (err) {
           return {
+            success: false as const,
             found: false,
             error:
               err instanceof Error

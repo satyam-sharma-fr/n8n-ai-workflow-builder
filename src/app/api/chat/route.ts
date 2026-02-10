@@ -1,4 +1,4 @@
-import { streamText, convertToModelMessages, generateText } from "ai";
+import { streamText, convertToModelMessages, generateText, stepCountIs } from "ai";
 import { createGatewayProvider } from "@ai-sdk/gateway";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
@@ -57,6 +57,7 @@ export async function POST(req: Request) {
     system: SYSTEM_PROMPT,
     messages: modelMessages,
     tools,
+    stopWhen: stepCountIs(5), // Allow multiple tool-call rounds so the model can use RAG results
   });
 
   return result.toUIMessageStreamResponse();

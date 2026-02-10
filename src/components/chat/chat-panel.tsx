@@ -6,7 +6,6 @@ import { useSettings } from "@/contexts/settings-context";
 import { useWorkflowStore } from "@/stores/workflow-store";
 import { Shimmer } from "@/components/ai-elements/shimmer";
 import { Badge } from "@/components/ui/badge";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Workflow, Bot, User, Wrench, Send, Square } from "lucide-react";
@@ -96,12 +95,13 @@ export function ChatPanel() {
     }
   }, [messages, setWorkflow]);
 
-  // Auto-scroll on new messages
+  // Auto-scroll to bottom when messages change or while streaming
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    const el = scrollRef.current;
+    if (el) {
+      el.scrollTop = el.scrollHeight;
     }
-  }, [messages]);
+  }, [messages, status]);
 
   const handleSend = useCallback(
     (text: string) => {
@@ -125,9 +125,12 @@ export function ChatPanel() {
   const isStreaming = status === "streaming" || status === "submitted";
 
   return (
-    <div className="flex h-full flex-col">
-      {/* Messages area */}
-      <ScrollArea ref={scrollRef} className="flex-1">
+    <div className="flex h-full flex-col overflow-hidden">
+      {/* Messages area — plain div for reliable scrolling */}
+      <div
+        ref={scrollRef}
+        className="min-h-0 flex-1 overflow-y-auto"
+      >
         {messages.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-4 p-6 pt-16">
             <Workflow className="size-10 text-muted-foreground/40" />
@@ -176,7 +179,7 @@ export function ChatPanel() {
             )}
           </div>
         )}
-      </ScrollArea>
+      </div>
 
       {/* Input area */}
       <div className="border-t p-3">
@@ -275,7 +278,12 @@ function MessagePart({ part }: { part: any }) {
     const isComplete = part.state === "output-available";
     const isError = part.state === "output-error";
     const output = isComplete ? (part as any).output : undefined;
-    const success = Boolean(isComplete && output?.success);
+    // A tool is successful if it completed AND either:
+    // - has success: true, or
+    // - does not have an explicit success: false (i.e. no `success` field means OK)
+    const success = Boolean(
+      isComplete && (output?.success !== false)
+    );
 
     const errorMsg = isError
       ? (part as any).errorText

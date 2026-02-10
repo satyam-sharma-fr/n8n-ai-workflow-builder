@@ -4,6 +4,7 @@ import { N8nClient } from "@/lib/n8n/client";
 import {
   findRelevantNodeDocs,
   getNodeDocsByType,
+  findRelevantTemplates,
 } from "@/lib/rag/retrieval";
 
 const n8nNodeSchema = z.object({
@@ -73,6 +74,66 @@ function toN8nConnections(
     };
   }
   return result;
+}
+
+/**
+ * Trim a workflow JSON for context-window-safe LLM consumption.
+ * Strips position, IDs, and other non-essential fields; keeps the
+ * node structure (name, type, typeVersion, parameters) and connections.
+ * Caps total serialized size per template.
+ */
+function trimWorkflowJson(
+  workflowJson: {
+    nodes: unknown[];
+    connections: Record<string, unknown>;
+  } | null
+): unknown | null {
+  if (!workflowJson) return null;
+
+  const MAX_JSON_LENGTH = 3000;
+
+  try {
+    const trimmedNodes = (workflowJson.nodes as Array<Record<string, unknown>>).map((node) => {
+      const trimmed: Record<string, unknown> = {
+        name: node.name,
+        type: node.type,
+      };
+      if (node.typeVersion != null) trimmed.typeVersion = node.typeVersion;
+      if (node.parameters && Object.keys(node.parameters as object).length > 0) {
+        trimmed.parameters = node.parameters;
+      }
+      if (node.credentials) trimmed.credentials = node.credentials;
+      return trimmed;
+    });
+
+    const result = {
+      nodes: trimmedNodes,
+      connections: workflowJson.connections,
+    };
+
+    const serialized = JSON.stringify(result);
+    if (serialized.length > MAX_JSON_LENGTH) {
+      // If too large, further strip parameters to just keys
+      const compactNodes = trimmedNodes.map((n) => {
+        if (n.parameters && typeof n.parameters === "object") {
+          return {
+            ...n,
+            parameters: Object.fromEntries(
+              Object.entries(n.parameters as Record<string, unknown>).map(
+                ([k, v]) => [k, typeof v === "string" && v.length > 100 ? v.slice(0, 100) + "…" : v]
+              )
+            ),
+          };
+        }
+        return n;
+      });
+      return { nodes: compactNodes, connections: workflowJson.connections };
+    }
+
+    return result;
+  } catch {
+    return null;
+  }
 }
 
 export function createWorkflowTools(n8nUrl: string, n8nKey: string) {
@@ -169,6 +230,59 @@ export function createWorkflowTools(n8nUrl: string, n8nKey: string) {
               err instanceof Error
                 ? err.message
                 : "Failed to fetch node details",
+          };
+        }
+      },
+    }),
+
+    getWorkflowTemplates: tool({
+      description:
+        "Search for official n8n workflow templates that match what the user wants to build. " +
+        "Returns real, production-tested workflow examples with complete node configurations " +
+        "and connections. ALWAYS call this BEFORE creating a new workflow to find a relevant " +
+        "template to use as a blueprint. This dramatically improves accuracy.",
+      inputSchema: z.object({
+        query: z.string().describe(
+          "What kind of workflow the user wants, e.g. 'AI agent with tools', " +
+          "'Slack notification on new email', 'RAG chatbot with vector store'"
+        ),
+      }),
+      execute: async ({ query }) => {
+        try {
+          const templates = await findRelevantTemplates(query, 3);
+          if (templates.length === 0) {
+            return {
+              success: true as const,
+              results: [],
+              message:
+                "No workflow templates found. The templates database may need to be synced. " +
+                "Fall back to node documentation and your built-in patterns. " +
+                "Ask the user to sync from Settings if needed.",
+            };
+          }
+          return {
+            success: true as const,
+            results: templates.map((t) => ({
+              templateId: t.templateId,
+              name: t.name,
+              description: t.description,
+              category: t.category,
+              nodeTypes: t.nodeTypes,
+              similarity: Math.round(t.similarity * 100) / 100,
+              workflow: trimWorkflowJson(t.workflowJson),
+            })),
+          };
+        } catch (err) {
+          return {
+            success: false as const,
+            results: [],
+            error:
+              err instanceof Error
+                ? err.message
+                : "Failed to search templates",
+            message:
+              "Template database is not available. Proceed with node documentation " +
+              "and built-in patterns.",
           };
         }
       },

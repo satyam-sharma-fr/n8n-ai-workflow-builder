@@ -1,14 +1,14 @@
 import { runIngestion, type SyncResult } from "@/lib/rag/ingest";
 import { db } from "@/lib/db";
 import { syncLog } from "@/lib/db/schema";
-import { desc } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 
 export const maxDuration = 300; // 5 minutes — ingestion can be slow
 
 /**
  * POST /api/sync-docs
  *
- * Triggers the n8n node documentation ingestion pipeline.
+ * Triggers the n8n node documentation + template ingestion pipeline.
  * Protected by CRON_SECRET (for Vercel Cron) or the user's AI key (for manual trigger).
  */
 export async function POST(req: Request) {
@@ -36,6 +36,7 @@ export async function POST(req: Request) {
       success: result.success,
       nodesProcessed: result.nodesProcessed,
       chunksCreated: result.chunksCreated,
+      templatesProcessed: result.templatesProcessed,
       errors: result.errors.slice(0, 10), // Limit error output
       durationMs: result.duration,
     });
@@ -71,6 +72,7 @@ export async function GET(req: Request) {
         success: result.success,
         nodesProcessed: result.nodesProcessed,
         chunksCreated: result.chunksCreated,
+        templatesProcessed: result.templatesProcessed,
         durationMs: result.duration,
       });
     } catch (err) {
@@ -84,35 +86,59 @@ export async function GET(req: Request) {
     }
   }
 
-  // Regular GET: return latest sync status
+  // Regular GET: return latest sync status for both sources
   try {
-    const latest = await db
-      .select()
-      .from(syncLog)
-      .orderBy(desc(syncLog.syncedAt))
-      .limit(1);
+    const [docsSync, templatesSync] = await Promise.all([
+      db
+        .select()
+        .from(syncLog)
+        .where(eq(syncLog.source, "github-docs"))
+        .orderBy(desc(syncLog.syncedAt))
+        .limit(1),
+      db
+        .select()
+        .from(syncLog)
+        .where(eq(syncLog.source, "n8n-templates"))
+        .orderBy(desc(syncLog.syncedAt))
+        .limit(1),
+    ]);
 
-    if (latest.length === 0) {
+    const docsLog = docsSync[0] ?? null;
+    const templatesLog = templatesSync[0] ?? null;
+
+    if (!docsLog && !templatesLog) {
       return Response.json({
         lastSync: null,
+        lastTemplateSync: null,
         message: "No sync has been performed yet.",
       });
     }
 
-    const log = latest[0];
     return Response.json({
-      lastSync: {
-        status: log.status,
-        source: log.source,
-        nodesProcessed: log.nodesProcessed,
-        error: log.error,
-        syncedAt: log.syncedAt,
-      },
+      lastSync: docsLog
+        ? {
+            status: docsLog.status,
+            source: docsLog.source,
+            nodesProcessed: docsLog.nodesProcessed,
+            error: docsLog.error,
+            syncedAt: docsLog.syncedAt,
+          }
+        : null,
+      lastTemplateSync: templatesLog
+        ? {
+            status: templatesLog.status,
+            source: templatesLog.source,
+            templatesProcessed: templatesLog.nodesProcessed,
+            error: templatesLog.error,
+            syncedAt: templatesLog.syncedAt,
+          }
+        : null,
     });
   } catch (err) {
     // Database might not be set up yet
     return Response.json({
       lastSync: null,
+      lastTemplateSync: null,
       message: "Database not configured yet.",
       error: err instanceof Error ? err.message : "Unknown error",
     });

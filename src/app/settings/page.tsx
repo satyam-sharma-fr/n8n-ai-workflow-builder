@@ -19,11 +19,18 @@ import { useCallback, useEffect, useState } from "react";
 
 type ConnectionState = "idle" | "testing" | "success" | "error";
 
-interface SyncStatus {
+interface SyncStatusData {
   lastSync: {
     status: string;
     source: string;
     nodesProcessed: number;
+    error: string | null;
+    syncedAt: string;
+  } | null;
+  lastTemplateSync: {
+    status: string;
+    source: string;
+    templatesProcessed: number;
     error: string | null;
     syncedAt: string;
   } | null;
@@ -38,12 +45,13 @@ export default function SettingsPage() {
   const [n8nConnError, setN8nConnError] = useState("");
 
   // Sync state
-  const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
+  const [syncStatus, setSyncStatus] = useState<SyncStatusData | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<{
     success: boolean;
     nodesProcessed?: number;
     chunksCreated?: number;
+    templatesProcessed?: number;
     error?: string;
   } | null>(null);
 
@@ -215,8 +223,15 @@ export default function SettingsPage() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
+                  {/* OpenAI */}
+                  <SelectItem value="openai/gpt-4.1">GPT-4.1</SelectItem>
+                  <SelectItem value="openai/gpt-4.1-mini">GPT-4.1 Mini</SelectItem>
                   <SelectItem value="openai/gpt-4o">GPT-4o</SelectItem>
                   <SelectItem value="openai/gpt-4o-mini">GPT-4o Mini</SelectItem>
+                  <SelectItem value="openai/o3">o3 (Reasoning)</SelectItem>
+                  <SelectItem value="openai/o4-mini">o4-mini (Reasoning)</SelectItem>
+                  {/* Anthropic */}
+                  <SelectItem value="anthropic/claude-opus-4-20250514">Claude Opus 4</SelectItem>
                   <SelectItem value="anthropic/claude-sonnet-4-20250514">Claude Sonnet 4</SelectItem>
                   <SelectItem value="anthropic/claude-haiku-3.5">Claude 3.5 Haiku</SelectItem>
                 </SelectContent>
@@ -307,25 +322,25 @@ export default function SettingsPage() {
 
         <Separator className="my-6" />
 
-        {/* Node Documentation Sync */}
+        {/* Node Documentation & Templates Sync */}
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Database className="size-5" />
-              Node Documentation
+              Node Documentation &amp; Templates
             </CardTitle>
             <CardDescription>
-              Sync n8n node documentation so the AI uses the latest node versions,
-              parameters, and configurations when building workflows.
+              Sync n8n node documentation and official workflow templates so the AI
+              uses the latest node versions, parameters, and proven workflow patterns.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            {/* Last sync info */}
+            {/* Last sync info — Node Docs */}
             {syncStatus?.lastSync ? (
               <div className="rounded-lg border bg-muted/30 px-4 py-3">
                 <div className="flex items-center justify-between">
                   <div className="space-y-1">
-                    <p className="text-sm font-medium">Last Synced</p>
+                    <p className="text-sm font-medium">Node Documentation</p>
                     <p className="text-xs text-muted-foreground">
                       {new Date(syncStatus.lastSync.syncedAt).toLocaleString()}
                     </p>
@@ -356,8 +371,43 @@ export default function SettingsPage() {
             ) : (
               <div className="rounded-lg border border-dashed bg-muted/20 px-4 py-3">
                 <p className="text-sm text-muted-foreground">
-                  {syncStatus?.message ?? "No sync has been performed yet. Click \"Sync Now\" to index n8n node documentation."}
+                  {syncStatus?.message ?? "No sync has been performed yet. Click \"Sync Now\" to index n8n node documentation and workflow templates."}
                 </p>
+              </div>
+            )}
+
+            {/* Last sync info — Workflow Templates */}
+            {syncStatus?.lastTemplateSync && (
+              <div className="rounded-lg border bg-muted/30 px-4 py-3">
+                <div className="flex items-center justify-between">
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium">Workflow Templates</p>
+                    <p className="text-xs text-muted-foreground">
+                      {new Date(syncStatus.lastTemplateSync.syncedAt).toLocaleString()}
+                    </p>
+                  </div>
+                  <div className="text-right space-y-1">
+                    <p className="text-sm">
+                      <span
+                        className={
+                          syncStatus.lastTemplateSync.status === "success"
+                            ? "text-green-600"
+                            : "text-destructive"
+                        }
+                      >
+                        {syncStatus.lastTemplateSync.status === "success" ? "Success" : "Error"}
+                      </span>
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {syncStatus.lastTemplateSync.templatesProcessed} templates synced
+                    </p>
+                  </div>
+                </div>
+                {syncStatus.lastTemplateSync.error && (
+                  <p className="mt-2 text-xs text-destructive">
+                    {syncStatus.lastTemplateSync.error}
+                  </p>
+                )}
               </div>
             )}
 
@@ -373,7 +423,10 @@ export default function SettingsPage() {
                 {syncResult.success ? (
                   <p>
                     Sync completed: {syncResult.nodesProcessed} nodes processed,{" "}
-                    {syncResult.chunksCreated} documentation chunks created.
+                    {syncResult.chunksCreated} documentation chunks created
+                    {syncResult.templatesProcessed
+                      ? `, ${syncResult.templatesProcessed} templates synced`
+                      : ""}.
                   </p>
                 ) : (
                   <p>Sync failed: {syncResult.error}</p>
@@ -397,12 +450,12 @@ export default function SettingsPage() {
                 {isSyncing ? "Syncing..." : "Sync Now"}
               </Button>
               <p className="text-xs text-muted-foreground">
-                Fetches latest node docs from GitHub. May take a few minutes.
+                Fetches latest node docs and workflow templates. May take a few minutes.
               </p>
             </div>
 
             <p className="text-xs text-muted-foreground">
-              Documentation is automatically synced weekly via Vercel Cron.
+              Documentation and templates are automatically synced weekly via Vercel Cron.
               You can also manually sync anytime after an n8n update.
             </p>
           </CardContent>

@@ -23,6 +23,7 @@ const SUGGESTIONS = [
 const FRIENDLY_TOOL_NAMES: Record<string, string> = {
   getNodeDocumentation: "Looking up node docs",
   getNodeDetails: "Fetching node details",
+  getWorkflowTemplates: "Searching workflow templates",
   createWorkflow: "Creating workflow",
   updateWorkflow: "Updating workflow",
   addNode: "Adding node",

@@ -3,6 +3,7 @@ import { getDbUnpooled } from "@/lib/db";
 import { nodeDocs, syncLog } from "@/lib/db/schema";
 import { eq, and } from "drizzle-orm";
 import { generateEmbeddings } from "./embedding";
+import { runTemplateIngestion } from "./ingest-templates";
 
 // Max content length per chunk (in characters).
 const MAX_CONTENT_LENGTH = 2000;
@@ -532,6 +533,7 @@ export interface SyncResult {
   success: boolean;
   nodesProcessed: number;
   chunksCreated: number;
+  templatesProcessed: number;
   errors: string[];
   duration: number;
 }
@@ -549,6 +551,7 @@ export async function runIngestion(): Promise<SyncResult> {
   const errors: string[] = [];
   let nodesProcessed = 0;
   let chunksCreated = 0;
+  let templatesProcessed = 0;
 
   try {
     console.log("[ingest] Starting ingestion pipeline...");
@@ -591,109 +594,125 @@ export async function runIngestion(): Promise<SyncResult> {
     if (allChunks.length === 0) {
       errors.push("No chunks generated — check GitHub API access");
       await logSync("github-docs", "error", 0, errors.join("; "));
-      return {
-        success: false,
-        nodesProcessed: 0,
-        chunksCreated: 0,
-        errors,
-        duration: Date.now() - startTime,
-      };
+      // Don't return — still run template ingestion below
     }
 
-    // Step 5: Generate embeddings in batches
-    console.log("[ingest] Generating embeddings...");
-    const chunkTexts = allChunks.map((c) => c.content);
-    const embeddings = await generateEmbeddings(chunkTexts);
+    if (allChunks.length > 0) {
+      // Step 5: Generate embeddings in batches
+      console.log("[ingest] Generating embeddings...");
+      const chunkTexts = allChunks.map((c) => c.content);
+      const embeddings = await generateEmbeddings(chunkTexts);
 
-    // Step 6: Upsert into database
-    console.log("[ingest] Upserting into database...");
-    const UPSERT_BATCH = 50;
+      // Step 6: Upsert into database
+      console.log("[ingest] Upserting into database...");
+      const UPSERT_BATCH = 50;
 
-    // Use raw SQL via the neon() driver for inserts.
-    // Drizzle ORM's pgvector serialization through the Neon HTTP driver fails
-    // for certain records because the 1536-float embedding array, when encoded
-    // as a JSON parameter, can exceed the driver's internal limits.
-    // By sending the embedding as a text literal with ::vector cast, we avoid this.
-    const rawSql = getRawSql();
+      // Use raw SQL via the neon() driver for inserts.
+      // Drizzle ORM's pgvector serialization through the Neon HTTP driver fails
+      // for certain records because the 1536-float embedding array, when encoded
+      // as a JSON parameter, can exceed the driver's internal limits.
+      // By sending the embedding as a text literal with ::vector cast, we avoid this.
+      const rawSql = getRawSql();
 
-    // Use Drizzle for deletes (no embedding involved, so no size issue)
-    const ingestionDb = getDbUnpooled();
+      // Use Drizzle for deletes (no embedding involved, so no size issue)
+      const ingestionDb = getDbUnpooled();
 
-    for (let i = 0; i < allChunks.length; i += UPSERT_BATCH) {
-      const batchChunks = allChunks.slice(i, i + UPSERT_BATCH);
-      const batchEmbeddings = embeddings.slice(i, i + UPSERT_BATCH);
+      for (let i = 0; i < allChunks.length; i += UPSERT_BATCH) {
+        const batchChunks = allChunks.slice(i, i + UPSERT_BATCH);
+        const batchEmbeddings = embeddings.slice(i, i + UPSERT_BATCH);
 
-      for (let j = 0; j < batchChunks.length; j++) {
-        const chunk = batchChunks[j];
-        const embedding = batchEmbeddings[j];
+        for (let j = 0; j < batchChunks.length; j++) {
+          const chunk = batchChunks[j];
+          const embedding = batchEmbeddings[j];
 
-        try {
-          // Delete existing row for this node + chunk type
-          await ingestionDb
-            .delete(nodeDocs)
-            .where(
-              and(
-                eq(nodeDocs.nodeType, chunk.nodeType),
-                eq(nodeDocs.chunkType, chunk.chunkType)
-              )
+          try {
+            // Delete existing row for this node + chunk type
+            await ingestionDb
+              .delete(nodeDocs)
+              .where(
+                and(
+                  eq(nodeDocs.nodeType, chunk.nodeType),
+                  eq(nodeDocs.chunkType, chunk.chunkType)
+                )
+              );
+
+            // Truncate content to a reasonable length
+            const truncatedContent =
+              chunk.content.length > MAX_CONTENT_LENGTH
+                ? chunk.content.slice(0, MAX_CONTENT_LENGTH) + "\n…[truncated]"
+                : chunk.content;
+
+            // Convert embedding array to PostgreSQL vector literal string
+            const embeddingLiteral = `[${embedding.join(",")}]`;
+
+            // Insert using raw SQL — embedding sent as text with ::vector cast
+            await rawSql`
+              INSERT INTO node_docs
+                (node_type, display_name, type_version, chunk_type, content, metadata, embedding, updated_at)
+              VALUES
+                (${chunk.nodeType}, ${chunk.displayName}, ${chunk.typeVersion},
+                 ${chunk.chunkType}, ${truncatedContent},
+                 ${JSON.stringify(chunk.metadata ?? {})}::jsonb,
+                 ${embeddingLiteral}::vector,
+                 NOW())
+            `;
+
+            chunksCreated++;
+          } catch (err) {
+            const errMsg = err instanceof Error ? err.message : "Unknown";
+            // Truncate error message to avoid huge logs (embedding text in error)
+            const shortErr =
+              errMsg.length > 200
+                ? errMsg.slice(0, 200) + "…"
+                : errMsg;
+            errors.push(
+              `Upsert failed for ${chunk.nodeType}/${chunk.chunkType}: ${shortErr}`
             );
-
-          // Truncate content to a reasonable length
-          const truncatedContent =
-            chunk.content.length > MAX_CONTENT_LENGTH
-              ? chunk.content.slice(0, MAX_CONTENT_LENGTH) + "\n…[truncated]"
-              : chunk.content;
-
-          // Convert embedding array to PostgreSQL vector literal string
-          const embeddingLiteral = `[${embedding.join(",")}]`;
-
-          // Insert using raw SQL — embedding sent as text with ::vector cast
-          await rawSql`
-            INSERT INTO node_docs
-              (node_type, display_name, type_version, chunk_type, content, metadata, embedding, updated_at)
-            VALUES
-              (${chunk.nodeType}, ${chunk.displayName}, ${chunk.typeVersion},
-               ${chunk.chunkType}, ${truncatedContent},
-               ${JSON.stringify(chunk.metadata ?? {})}::jsonb,
-               ${embeddingLiteral}::vector,
-               NOW())
-          `;
-
-          chunksCreated++;
-        } catch (err) {
-          const errMsg = err instanceof Error ? err.message : "Unknown";
-          // Truncate error message to avoid huge logs (embedding text in error)
-          const shortErr =
-            errMsg.length > 200
-              ? errMsg.slice(0, 200) + "…"
-              : errMsg;
-          errors.push(
-            `Upsert failed for ${chunk.nodeType}/${chunk.chunkType}: ${shortErr}`
-          );
-          console.error(
-            `[ingest] Failed ${chunk.nodeType}/${chunk.chunkType}:`,
-            shortErr
-          );
+            console.error(
+              `[ingest] Failed ${chunk.nodeType}/${chunk.chunkType}:`,
+              shortErr
+            );
+          }
         }
       }
+
+      console.log(
+        `[ingest] Done. ${chunksCreated} chunks upserted, ${errors.length} errors.`
+      );
+
+      // Log node docs sync
+      await logSync(
+        "github-docs",
+        errors.length === 0 ? "success" : "error",
+        nodesProcessed,
+        errors.length > 0 ? errors.slice(0, 5).join("; ") : undefined
+      );
     }
 
-    console.log(
-      `[ingest] Done. ${chunksCreated} chunks upserted, ${errors.length} errors.`
-    );
-
-    // Log sync
-    await logSync(
-      "github-docs",
-      errors.length === 0 ? "success" : "error",
-      nodesProcessed,
-      errors.length > 0 ? errors.slice(0, 5).join("; ") : undefined
-    );
+    // ── Template ingestion (independent, fault-isolated) ──
+    try {
+      console.log("[ingest] Starting template ingestion...");
+      const templateResult = await runTemplateIngestion();
+      templatesProcessed = templateResult.templatesProcessed;
+      if (templateResult.errors.length > 0) {
+        errors.push(
+          ...templateResult.errors.slice(0, 5).map((e) => `[templates] ${e}`)
+        );
+      }
+      console.log(
+        `[ingest] Template ingestion done: ${templatesProcessed} templates processed`
+      );
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : "Unknown";
+      errors.push(`Template ingestion failed: ${errMsg}`);
+      console.error("[ingest] Template ingestion failed:", errMsg);
+    }
 
     return {
       success: errors.length === 0,
       nodesProcessed,
       chunksCreated,
+      templatesProcessed,
       errors,
       duration: Date.now() - startTime,
     };
@@ -707,6 +726,7 @@ export async function runIngestion(): Promise<SyncResult> {
       success: false,
       nodesProcessed,
       chunksCreated,
+      templatesProcessed,
       errors,
       duration: Date.now() - startTime,
     };
